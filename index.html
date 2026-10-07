@@ -205,7 +205,7 @@ a{color:inherit}
 
 <script>
 /* ============ CONFIG : colle ici l'URL de ton script Google (se termine par /exec) ============ */
-const API_URL = 'https://script.google.com/macros/s/AKfycbzCaJPHfM1ilzZgE7aA6oH0nhjxWjo2nOX2a_dsxew6ab4dNHksa5NHOe19AVNYkdxyhw/exec';
+const API_URL = 'https://script.google.com/macros/s/AKfycbwPCJu2MoWSUrnHiUOZurtl73x6QwqEIdcE4SmEDyGJX1keRvG_iRTHg4ekUBbBNZfLug/exec';
 /* ============================================================================================== */
 
 const ST = {
@@ -217,7 +217,8 @@ const ST = {
 const ORDER = ['todo','test','win','cut'];
 const DEFAULT_SHOPS = ['U Glam','Namilka','Animaux','Parfums'];
 const OK_TYPES = ['image/png','image/jpeg','image/webp','image/gif','video/mp4','video/webm','video/quicktime'];
-const MAX_MB = 30;
+const MAX_MB = 1024;        // envoi direct vers Drive
+const SMALL_MB = 30;        // secours via le script si l'envoi direct échoue
 const FIELDS = ['id','name','status','boutique','produit','angle','format','hook','notes','fileId','mime','createdAt','launchedAt','endedAt','spend','roas','ctr','cpa','parentId','parentName'];
 
 let KEY = null, creas = [], loaded = false, lastLoad = 0;
@@ -300,8 +301,39 @@ function checkFiles(files){
   const bad=files.filter(f=>!OK_TYPES.includes(f.type));
   if (bad.length) toast(`${bad.length} fichier(s) ignoré(s) : formats acceptés PNG, JPG, WebP, GIF, MP4, WebM, MOV.`, 4500);
   const big=files.filter(f=>OK_TYPES.includes(f.type)&&f.size>MAX_MB*1024*1024);
-  if (big.length) toast(`${big.length} fichier(s) de plus de ${MAX_MB} Mo ignoré(s) : compresse-les avant.`, 4500);
+  if (big.length) toast(`${big.length} fichier(s) de plus de 1 Go ignoré(s) : compresse-les avant.`, 4500);
   return files.filter(f=>OK_TYPES.includes(f.type)&&f.size<=MAX_MB*1024*1024);
+}
+
+/* Envoi direct navigateur → Drive (session ouverte par le script), avec progression */
+function putFile(url, f, onProgress){
+  return new Promise((ok,ko)=>{
+    const x = new XMLHttpRequest();
+    x.open('PUT', url);
+    x.setRequestHeader('Content-Type', f.type);
+    x.upload.onprogress = e=>{ if (e.lengthComputable) onProgress(e.loaded/e.total); };
+    x.onload = ()=>{
+      if (x.status>=200 && x.status<300){ try{ ok(JSON.parse(x.responseText).id); }catch(e){ ko(new Error('réponse de Drive illisible')); } }
+      else ko(new Error('Drive a répondu '+x.status));
+    };
+    x.onerror = ()=>ko(new Error('connexion à Drive coupée'));
+    x.send(f);
+  });
+}
+async function sendFile(f, label){
+  try{
+    const s = await api('startUpload', {name:f.name, mime:f.type, size:f.size, origin:location.origin});
+    const id = await putFile(s.uploadUrl, f, p=>toast(`${label} — ${Math.round(p*100)} %`, 600000));
+    await api('finishUpload', {fileId:id});
+    return id;
+  }catch(e){
+    if (e.message==='unauthorized') throw e;
+    if (f.size <= SMALL_MB*1024*1024){
+      const r = await api('upload', {name:f.name, mime:f.type, data: await toBase64(f)});
+      return r.fileId;
+    }
+    throw e;
+  }
 }
 
 async function uploadFiles(fileList, status='todo'){
@@ -317,11 +349,10 @@ async function uploadFiles(fileList, status='todo'){
   if (files.length===1) openDrawer(made[0][0].id);
   let done=0; pending++; setSync();
   for (const [c,f] of made){
-    toast(`Envoi ${done+1}/${files.length} vers Drive : ${f.name}`, 120000);
+    const label = `Envoi ${done+1}/${files.length} : ${f.name}`;
+    toast(label, 600000);
     try{
-      const data = await toBase64(f);
-      const r = await api('upload', {name:f.name, mime:f.type, data});
-      c.fileId = r.fileId; delete c._uploading; done++;
+      c.fileId = await sendFile(f, label); delete c._uploading; done++;
       queueSave(c.id, 0);
     }catch(e){
       creas = creas.filter(x=>x.id!==c.id);
@@ -338,10 +369,9 @@ async function replaceVisual(id, file){
   const c = creas.find(x=>x.id===id); if (!c) return;
   const old = c.fileId;
   localPreview[id] = URL.createObjectURL(f); c._uploading = true; c.mime = f.type;
-  render(); renderDrawer(); pending++; setSync(); toast('Envoi du visuel vers Drive…', 120000);
+  render(); renderDrawer(); pending++; setSync(); toast('Envoi du visuel vers Drive…', 600000);
   try{
-    const r = await api('upload', {name:f.name, mime:f.type, data: await toBase64(f)});
-    c.fileId = r.fileId; delete c._uploading;
+    c.fileId = await sendFile(f, 'Envoi du visuel'); delete c._uploading;
     if (!c.format || c.format==='Statique' || c.format==='Vidéo') c.format = f.type.startsWith('video')?'Vidéo':'Statique';
     queueSave(id, 0); toast('Visuel mis à jour.');
     if (old && !creas.some(x=>x.id!==id && x.fileId===old)) api('delete', {id:'__none__', deleteFile:old}).catch(()=>{});
