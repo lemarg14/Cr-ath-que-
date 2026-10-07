@@ -53,6 +53,10 @@ function doPost(e) {
         return json_({ ok: true });
       case 'upload':
         return json_({ ok: true, fileId: upload_(req) });
+      case 'startUpload':
+        return json_({ ok: true, uploadUrl: startUpload_(req) });
+      case 'finishUpload':
+        return json_({ ok: true, fileId: finishUpload_(req.fileId) });
       default:
         return json_({ ok: false, error: 'Action inconnue : ' + req.action });
     }
@@ -145,6 +149,32 @@ function upload_(req) {
   const blob = Utilities.newBlob(Utilities.base64Decode(req.data), req.mime, req.name);
   const file = folder_().createFile(blob);
   // Lien "toute personne disposant du lien" : nécessaire pour afficher les miniatures dans la page.
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  return file.getId();
+}
+
+/* Gros fichiers : le script ouvre une session d'envoi Drive, le navigateur y envoie le fichier directement. */
+function startUpload_(req) {
+  const meta = { name: req.name, mimeType: req.mime, parents: [folder_().getId()] };
+  const res = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
+    method: 'post',
+    contentType: 'application/json; charset=UTF-8',
+    payload: JSON.stringify(meta),
+    headers: {
+      Authorization: 'Bearer ' + ScriptApp.getOAuthToken(),
+      'X-Upload-Content-Type': req.mime,
+      'X-Upload-Content-Length': String(req.size),
+      Origin: req.origin
+    },
+    muteHttpExceptions: true
+  });
+  if (res.getResponseCode() !== 200) throw new Error('Drive a refusé la session d\'envoi (' + res.getResponseCode() + ') : ' + res.getContentText().slice(0, 200));
+  const h = res.getAllHeaders();
+  return h['Location'] || h['location'];
+}
+
+function finishUpload_(fileId) {
+  const file = DriveApp.getFileById(fileId);
   file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
   return file.getId();
 }
